@@ -1,0 +1,4 @@
+node_modules/
+   bolao.db
+   .env
+   *.log
