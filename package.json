@@ -20,25 +20,3 @@
     "node-cron": "^3.0.3"
   }
 }
-```
-
-**Mudanças importantes:**
-- ✅ Removi `devDependencies` (não precisa no deploy)
-- ✅ Simplifiquei `scripts` (só o `start` é necessário)
-
-Se estiver diferente, **edite no GitHub** e faça commit. O Render vai fazer deploy automático de novo.
-
----
-
-## ✅ **Solução 2: Build Command no Render**
-
-Volte no Render, vá em **Settings** (menu lateral) e confira:
-
-**Build Command:**
-```
-npm install
-```
-
-**Start Command:**
-```
-npm start
