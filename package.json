@@ -4,15 +4,11 @@
   "description": "Backend gratuito para Bolão Premier League",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["bolao", "premier-league", "futebol"],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
@@ -22,29 +18,27 @@
     "axios": "^1.6.2",
     "sqlite3": "^5.1.6",
     "node-cron": "^3.0.3"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
   }
 }
 ```
 
----
+**Mudanças importantes:**
+- ✅ Removi `devDependencies` (não precisa no deploy)
+- ✅ Simplifiquei `scripts` (só o `start` é necessário)
 
-## 📝 **Como adicionar no GitHub:**
-
-1. No seu repositório, clique em **Add file** → **Create new file**
-2. Nome do arquivo: `package.json`
-3. Cole o código acima
-4. **Commit new file**
+Se estiver diferente, **edite no GitHub** e faça commit. O Render vai fazer deploy automático de novo.
 
 ---
 
-## ✅ **Próximos arquivos que você precisa criar:**
+## ✅ **Solução 2: Build Command no Render**
 
-### **3. `.gitignore`**
+Volte no Render, vá em **Settings** (menu lateral) e confira:
+
+**Build Command:**
 ```
-node_modules/
-bolao.db
-.env
-*.log
+npm install
+```
+
+**Start Command:**
+```
+npm start
