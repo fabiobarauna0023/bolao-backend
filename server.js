@@ -10,7 +10,7 @@ const cron = require('node-cron');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'seu_secret_super_secreto_123';
-const FOOTBALL_API_KEY = process.env.FOOTBALL_API_KEY || 'SUA_CHAVE_AQUI';
+const FOOTBALL_API_KEY = process.env.FOOTBALL_API_KEY || '';
 const FOOTBALL_API_URL = 'https://api.football-data.org/v4';
 
 // Middleware
@@ -19,103 +19,153 @@ app.use(express.json());
 
 // ==================== BANCO DE DADOS SQLITE ====================
 
-const db = new sqlite3.Database('./bolao.db', (err) => {
-  if (err) {
-    console.error('❌ Erro ao conectar ao banco:', err);
-  } else {
-    console.log('✅ Conectado ao SQLite');
-    initDatabase();
-  }
-});
+let db;
+let dbReady = false;
 
 function initDatabase() {
-  // Criar tabelas
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      password TEXT NOT NULL,
-      email TEXT,
-      points INTEGER DEFAULT 0,
-      accessToken TEXT,
-      isAdmin INTEGER DEFAULT 0,
-      createdAt TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+  return new Promise((resolve, reject) => {
+    db = new sqlite3.Database('./bolao.db', (err) => {
+      if (err) {
+        console.error('❌ Erro ao conectar ao banco:', err);
+        reject(err);
+        return;
+      }
+      console.log('✅ Conectado ao SQLite');
+      
+      // Criar todas as tabelas em série
+      db.serialize(() => {
+        // Tabela de usuários
+        db.run(`
+          CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            email TEXT,
+            points INTEGER DEFAULT 0,
+            accessToken TEXT,
+            isAdmin INTEGER DEFAULT 0,
+            createdAt TEXT DEFAULT CURRENT_TIMESTAMP
+          )
+        `, (err) => {
+          if (err) console.error('Erro ao criar tabela users:', err);
+          else console.log('✅ Tabela users criada/verificada');
+        });
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS matches (
-      id TEXT PRIMARY KEY,
-      footballDataId INTEGER UNIQUE,
-      homeTeam TEXT NOT NULL,
-      awayTeam TEXT NOT NULL,
-      homeTeamLogo TEXT,
-      awayTeamLogo TEXT,
-      matchDate TEXT NOT NULL,
-      status TEXT DEFAULT 'SCHEDULED',
-      homeScore INTEGER,
-      awayScore INTEGER,
-      competition TEXT DEFAULT 'Premier League',
-      season TEXT,
-      matchday INTEGER,
-      updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+        // Tabela de partidas
+        db.run(`
+          CREATE TABLE IF NOT EXISTS matches (
+            id TEXT PRIMARY KEY,
+            footballDataId INTEGER UNIQUE,
+            homeTeam TEXT NOT NULL,
+            awayTeam TEXT NOT NULL,
+            homeTeamLogo TEXT,
+            awayTeamLogo TEXT,
+            matchDate TEXT NOT NULL,
+            status TEXT DEFAULT 'SCHEDULED',
+            homeScore INTEGER,
+            awayScore INTEGER,
+            competition TEXT DEFAULT 'Premier League',
+            season TEXT,
+            matchday INTEGER,
+            updatedAt TEXT DEFAULT CURRENT_TIMESTAMP
+          )
+        `, (err) => {
+          if (err) console.error('Erro ao criar tabela matches:', err);
+          else console.log('✅ Tabela matches criada/verificada');
+        });
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS bets (
-      id TEXT PRIMARY KEY,
-      userId TEXT NOT NULL,
-      username TEXT NOT NULL,
-      matchId TEXT NOT NULL,
-      homeScore INTEGER NOT NULL,
-      awayScore INTEGER NOT NULL,
-      points INTEGER DEFAULT 0,
-      createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-      updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(userId, matchId),
-      FOREIGN KEY(userId) REFERENCES users(id),
-      FOREIGN KEY(matchId) REFERENCES matches(id)
-    )
-  `);
+        // Tabela de palpites
+        db.run(`
+          CREATE TABLE IF NOT EXISTS bets (
+            id TEXT PRIMARY KEY,
+            userId TEXT NOT NULL,
+            username TEXT NOT NULL,
+            matchId TEXT NOT NULL,
+            homeScore INTEGER NOT NULL,
+            awayScore INTEGER NOT NULL,
+            points INTEGER DEFAULT 0,
+            createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
+            updatedAt TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(userId, matchId)
+          )
+        `, (err) => {
+          if (err) console.error('Erro ao criar tabela bets:', err);
+          else console.log('✅ Tabela bets criada/verificada');
+        });
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS tokens (
-      id TEXT PRIMARY KEY,
-      token TEXT UNIQUE NOT NULL,
-      isActive INTEGER DEFAULT 1,
-      usedBy TEXT,
-      createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
-      usedAt TEXT
-    )
-  `);
+        // Tabela de tokens
+        db.run(`
+          CREATE TABLE IF NOT EXISTS tokens (
+            id TEXT PRIMARY KEY,
+            token TEXT UNIQUE NOT NULL,
+            isActive INTEGER DEFAULT 1,
+            usedBy TEXT,
+            createdAt TEXT DEFAULT CURRENT_TIMESTAMP,
+            usedAt TEXT
+          )
+        `, (err) => {
+          if (err) console.error('Erro ao criar tabela tokens:', err);
+          else console.log('✅ Tabela tokens criada/verificada');
+        });
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS config (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    )
-  `);
+        // Tabela de configuração
+        db.run(`
+          CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+          )
+        `, (err) => {
+          if (err) console.error('Erro ao criar tabela config:', err);
+          else console.log('✅ Tabela config criada/verificada');
+        });
 
-  // Inserir tokens iniciais
-  const initialTokens = ['TOKEN123456', 'BOLAO2024', 'PALPITE99', 'FUTEBOL777'];
-  initialTokens.forEach(token => {
-    db.run(
-      `INSERT OR IGNORE INTO tokens (id, token) VALUES (?, ?)`,
-      [uuidv4(), token]
-    );
+        // Inserir dados iniciais
+        const initialTokens = ['TOKEN123456', 'BOLAO2024', 'PALPITE99', 'FUTEBOL777'];
+        initialTokens.forEach(token => {
+          db.run(
+            `INSERT OR IGNORE INTO tokens (id, token) VALUES (?, ?)`,
+            [uuidv4(), token],
+            (err) => {
+              if (err && !err.message.includes('UNIQUE')) {
+                console.error('Erro ao inserir token:', err);
+              }
+            }
+          );
+        });
+
+        // Inserir usuário admin
+        const adminPassword = bcrypt.hashSync('admin123', 10);
+        db.run(
+          `INSERT OR IGNORE INTO users (id, username, password, email, isAdmin, points) 
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          ['admin-001', 'admin', adminPassword, 'admin@bolao.com', 1, 0],
+          (err) => {
+            if (err && !err.message.includes('UNIQUE')) {
+              console.error('Erro ao criar admin:', err);
+            } else {
+              console.log('✅ Usuário admin verificado');
+            }
+          }
+        );
+
+        console.log('✅ Banco de dados inicializado com sucesso');
+        dbReady = true;
+        resolve();
+      });
+    });
   });
-
-  // Inserir usuário admin
-  const adminPassword = bcrypt.hashSync('admin123', 10);
-  db.run(
-    `INSERT OR IGNORE INTO users (id, username, password, email, isAdmin, points) 
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    ['admin-001', 'admin', adminPassword, 'admin@bolao.com', 1, 0]
-  );
-
-  console.log('✅ Banco de dados inicializado');
 }
+
+// Middleware para verificar se DB está pronto
+const ensureDbReady = (req, res, next) => {
+  if (!dbReady) {
+    return res.status(503).json({
+      success: false,
+      message: 'Banco de dados ainda está inicializando. Aguarde alguns segundos.'
+    });
+  }
+  next();
+};
 
 // ==================== MIDDLEWARE DE AUTENTICAÇÃO ====================
 
@@ -144,7 +194,7 @@ const authenticateToken = (req, res, next) => {
 
 // ==================== ROTAS DE AUTENTICAÇÃO ====================
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', ensureDbReady, async (req, res) => {
   try {
     const { username, password, access_token } = req.body;
 
@@ -213,7 +263,7 @@ app.post('/api/auth/register', async (req, res) => {
       }
     });
   } catch (error) {
-    if (error.message.includes('UNIQUE')) {
+    if (error.message && error.message.includes('UNIQUE')) {
       return res.status(409).json({
         success: false,
         message: 'Nome de usuário já está em uso'
@@ -227,9 +277,16 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', ensureDbReady, async (req, res) => {
   try {
     const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuário e senha são obrigatórios'
+      });
+    }
 
     const user = await new Promise((resolve, reject) => {
       db.get('SELECT * FROM users WHERE username = ?', [username], (err, row) => {
@@ -282,16 +339,16 @@ app.post('/api/auth/login', async (req, res) => {
 
 // ==================== ROTAS DE PARTIDAS ====================
 
-app.get('/api/matches', authenticateToken, (req, res) => {
+app.get('/api/matches', ensureDbReady, authenticateToken, (req, res) => {
   db.all('SELECT * FROM matches ORDER BY matchDate ASC', [], (err, rows) => {
     if (err) {
       return res.status(500).json({ success: false, message: err.message });
     }
-    res.json({ success: true, data: rows });
+    res.json({ success: true, data: rows || [] });
   });
 });
 
-app.get('/api/matches/:id', authenticateToken, (req, res) => {
+app.get('/api/matches/:id', ensureDbReady, authenticateToken, (req, res) => {
   db.get('SELECT * FROM matches WHERE id = ?', [req.params.id], (err, row) => {
     if (err) {
       return res.status(500).json({ success: false, message: err.message });
@@ -305,14 +362,14 @@ app.get('/api/matches/:id', authenticateToken, (req, res) => {
 
 // ==================== ROTAS DE PALPITES ====================
 
-app.get('/api/bets/user', authenticateToken, (req, res) => {
+app.get('/api/bets/user', ensureDbReady, authenticateToken, (req, res) => {
   db.all('SELECT * FROM bets WHERE userId = ?', [req.user.id], (err, rows) => {
     if (err) {
       return res.status(500).json({ success: false, message: err.message });
     }
 
     const betsObject = {};
-    rows.forEach(bet => {
+    (rows || []).forEach(bet => {
       betsObject[bet.matchId] = {
         matchId: bet.matchId,
         teamAScore: bet.homeScore,
@@ -325,9 +382,16 @@ app.get('/api/bets/user', authenticateToken, (req, res) => {
   });
 });
 
-app.post('/api/bets', authenticateToken, async (req, res) => {
+app.post('/api/bets', ensureDbReady, authenticateToken, async (req, res) => {
   try {
     const { matchId, teamAScore, teamBScore } = req.body;
+
+    if (!matchId || teamAScore === undefined || teamBScore === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: 'Dados incompletos'
+      });
+    }
 
     // Verificar se partida existe e não começou
     const match = await new Promise((resolve, reject) => {
@@ -375,16 +439,16 @@ app.post('/api/bets', authenticateToken, async (req, res) => {
 
 // ==================== ROTAS DE RANKING ====================
 
-app.get('/api/ranking', authenticateToken, (req, res) => {
+app.get('/api/ranking', ensureDbReady, authenticateToken, (req, res) => {
   db.all(
-    'SELECT id, username, points FROM users ORDER BY points DESC',
+    'SELECT id, username, points FROM users ORDER BY points DESC LIMIT 100',
     [],
     (err, rows) => {
       if (err) {
         return res.status(500).json({ success: false, message: err.message });
       }
 
-      const ranking = rows.map((user, index) => ({
+      const ranking = (rows || []).map((user, index) => ({
         ...user,
         position: index + 1
       }));
@@ -396,10 +460,13 @@ app.get('/api/ranking', authenticateToken, (req, res) => {
 
 // ==================== ROTAS DE USUÁRIO ====================
 
-app.get('/api/user/me', authenticateToken, (req, res) => {
+app.get('/api/user/me', ensureDbReady, authenticateToken, (req, res) => {
   db.get('SELECT id, username, email, points FROM users WHERE id = ?', [req.user.id], (err, row) => {
     if (err) {
       return res.status(500).json({ success: false, message: err.message });
+    }
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Usuário não encontrado' });
     }
     res.json({ success: true, data: row });
   });
@@ -407,10 +474,17 @@ app.get('/api/user/me', authenticateToken, (req, res) => {
 
 // ==================== ROTAS ADMIN ====================
 
-app.put('/api/admin/matches/:id/result', authenticateToken, async (req, res) => {
+app.put('/api/admin/matches/:id/result', ensureDbReady, authenticateToken, async (req, res) => {
   try {
     const { teamAScore, teamBScore } = req.body;
     const matchId = req.params.id;
+
+    if (teamAScore === undefined || teamBScore === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: 'Placar incompleto'
+      });
+    }
 
     await new Promise((resolve, reject) => {
       db.run(
@@ -418,8 +492,9 @@ app.put('/api/admin/matches/:id/result', authenticateToken, async (req, res) => 
          SET homeScore = ?, awayScore = ?, status = 'FINISHED', updatedAt = CURRENT_TIMESTAMP 
          WHERE id = ?`,
         [teamAScore, teamBScore, matchId],
-        (err) => {
+        function(err) {
           if (err) reject(err);
+          else if (this.changes === 0) reject(new Error('Partida não encontrada'));
           else resolve();
         }
       );
@@ -427,14 +502,21 @@ app.put('/api/admin/matches/:id/result', authenticateToken, async (req, res) => 
 
     await calculatePointsForMatch(matchId, teamAScore, teamBScore);
 
-    res.json({ success: true, message: 'Resultado atualizado' });
+    res.json({ success: true, message: 'Resultado atualizado com sucesso' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-app.post('/api/admin/import-matches', authenticateToken, async (req, res) => {
+app.post('/api/admin/import-matches', ensureDbReady, authenticateToken, async (req, res) => {
   try {
+    if (!FOOTBALL_API_KEY) {
+      return res.status(400).json({
+        success: false,
+        message: 'FOOTBALL_API_KEY não configurada nas variáveis de ambiente'
+      });
+    }
+
     const response = await axios.get(
       `${FOOTBALL_API_URL}/competitions/PL/matches`,
       {
@@ -444,7 +526,9 @@ app.post('/api/admin/import-matches', authenticateToken, async (req, res) => {
     );
 
     let imported = 0;
-    for (const match of response.data.matches) {
+    const matches = response.data.matches || [];
+
+    for (const match of matches) {
       const matchId = `pl_${match.id}`;
       
       await new Promise((resolve, reject) => {
@@ -458,36 +542,48 @@ app.post('/api/admin/import-matches', authenticateToken, async (req, res) => {
             match.id,
             match.homeTeam.name,
             match.awayTeam.name,
-            match.homeTeam.crest,
-            match.awayTeam.crest,
+            match.homeTeam.crest || '',
+            match.awayTeam.crest || '',
             match.utcDate,
             match.status,
-            match.score.fullTime.home,
-            match.score.fullTime.away,
-            match.season.startDate.split('-')[0],
+            match.score?.fullTime?.home,
+            match.score?.fullTime?.away,
+            match.season?.startDate?.split('-')[0] || '2024',
             match.matchday
           ],
           (err) => {
             if (err) reject(err);
-            else { imported++; resolve(); }
+            else { 
+              imported++; 
+              resolve(); 
+            }
           }
         );
       });
     }
 
-    res.json({ success: true, imported, total: response.data.matches.length });
+    res.json({ 
+      success: true, 
+      message: `${imported} partidas importadas`,
+      imported, 
+      total: matches.length 
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: error.message,
+      hint: error.response?.data?.message || 'Verifique a API Key'
+    });
   }
 });
 
-// ==================== SINCRONIZAÇÃO AUTOMÁTICA ====================
+// ==================== FUNÇÕES AUXILIARES ====================
 
 async function calculatePointsForMatch(matchId, homeScore, awayScore) {
   const bets = await new Promise((resolve, reject) => {
     db.all('SELECT * FROM bets WHERE matchId = ?', [matchId], (err, rows) => {
       if (err) reject(err);
-      else resolve(rows);
+      else resolve(rows || []);
     });
   });
 
@@ -516,6 +612,8 @@ async function calculatePointsForMatch(matchId, homeScore, awayScore) {
       );
     });
   }
+  
+  console.log(`✅ Pontos calculados para ${bets.length} palpites da partida ${matchId}`);
 }
 
 function calculateBetPoints(betHome, betAway, actualHome, actualAway) {
@@ -530,102 +628,130 @@ function calculateBetPoints(betHome, betAway, actualHome, actualAway) {
   return 0;
 }
 
-// Sincronização diária às 23:59
-cron.schedule('59 23 * * *', async () => {
-  console.log('🔄 Executando sincronização diária...');
-  
-  try {
-    const matches = await new Promise((resolve, reject) => {
-      db.all(
-        `SELECT * FROM matches 
-         WHERE status IN ('SCHEDULED', 'IN_PLAY') 
-         AND date(matchDate) = date('now')`,
-        [],
-        (err, rows) => {
-          if (err) reject(err);
-          else resolve(rows);
-        }
-      );
-    });
+// ==================== SINCRONIZAÇÃO AUTOMÁTICA ====================
 
-    for (const match of matches) {
-      try {
-        const response = await axios.get(
-          `${FOOTBALL_API_URL}/matches/${match.footballDataId}`,
-          { headers: { 'X-Auth-Token': FOOTBALL_API_KEY } }
+if (dbReady) {
+  cron.schedule('59 23 * * *', async () => {
+    console.log('🔄 Executando sincronização diária...');
+    
+    if (!FOOTBALL_API_KEY) {
+      console.log('⚠️  FOOTBALL_API_KEY não configurada, pulando sincronização');
+      return;
+    }
+    
+    try {
+      const matches = await new Promise((resolve, reject) => {
+        db.all(
+          `SELECT * FROM matches 
+           WHERE status IN ('SCHEDULED', 'IN_PLAY') 
+           AND date(matchDate) = date('now')`,
+          [],
+          (err, rows) => {
+            if (err) reject(err);
+            else resolve(rows || []);
+          }
         );
+      });
 
-        if (response.data.status === 'FINISHED') {
-          await new Promise((resolve, reject) => {
-            db.run(
-              `UPDATE matches 
-               SET status = 'FINISHED', homeScore = ?, awayScore = ? 
-               WHERE id = ?`,
-              [
-                response.data.score.fullTime.home,
-                response.data.score.fullTime.away,
-                match.id
-              ],
-              (err) => {
-                if (err) reject(err);
-                else resolve();
-              }
-            );
-          });
-
-          await calculatePointsForMatch(
-            match.id,
-            response.data.score.fullTime.home,
-            response.data.score.fullTime.away
+      for (const match of matches) {
+        try {
+          const response = await axios.get(
+            `${FOOTBALL_API_URL}/matches/${match.footballDataId}`,
+            { headers: { 'X-Auth-Token': FOOTBALL_API_KEY } }
           );
 
-          console.log(`✅ Atualizado: ${match.homeTeam} vs ${match.awayTeam}`);
+          if (response.data.status === 'FINISHED') {
+            await new Promise((resolve, reject) => {
+              db.run(
+                `UPDATE matches 
+                 SET status = 'FINISHED', homeScore = ?, awayScore = ? 
+                 WHERE id = ?`,
+                [
+                  response.data.score.fullTime.home,
+                  response.data.score.fullTime.away,
+                  match.id
+                ],
+                (err) => {
+                  if (err) reject(err);
+                  else resolve();
+                }
+              );
+            });
+
+            await calculatePointsForMatch(
+              match.id,
+              response.data.score.fullTime.home,
+              response.data.score.fullTime.away
+            );
+
+            console.log(`✅ Atualizado: ${match.homeTeam} vs ${match.awayTeam}`);
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 200));
+        } catch (error) {
+          console.error(`❌ Erro ao processar ${match.id}:`, error.message);
         }
-
-        await new Promise(resolve => setTimeout(resolve, 200));
-      } catch (error) {
-        console.error(`❌ Erro ao processar ${match.id}:`, error.message);
       }
-    }
 
-    console.log('✅ Sincronização concluída');
-  } catch (error) {
-    console.error('❌ Erro na sincronização:', error);
-  }
-});
+      console.log('✅ Sincronização concluída');
+    } catch (error) {
+      console.error('❌ Erro na sincronização:', error);
+    }
+  });
+}
 
 // ==================== ROTA RAIZ ====================
 
 app.get('/', (req, res) => {
   res.json({
     message: '⚽ API do Bolão Premier League',
-    version: '2.0.0',
+    version: '2.0.1',
     status: 'online',
-    database: 'SQLite',
-    hosting: 'Render.com (FREE)',
+    database: dbReady ? 'SQLite (Ready)' : 'SQLite (Initializing...)',
+    hosting: 'Render.com',
     endpoints: {
       auth: ['POST /api/auth/register', 'POST /api/auth/login'],
       matches: ['GET /api/matches', 'GET /api/matches/:id'],
       bets: ['GET /api/bets/user', 'POST /api/bets'],
       ranking: ['GET /api/ranking'],
+      user: ['GET /api/user/me'],
       admin: [
         'PUT /api/admin/matches/:id/result',
         'POST /api/admin/import-matches'
       ]
-    }
+    },
+    tokens: ['TOKEN123456', 'BOLAO2024', 'PALPITE99', 'FUTEBOL777']
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    dbReady,
+    timestamp: new Date().toISOString()
   });
 });
 
 // ==================== INICIAR SERVIDOR ====================
 
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-  console.log(`📍 Acesse: http://localhost:${PORT}`);
-  console.log(`💾 Banco: SQLite (arquivo local)`);
-  console.log(`☁️  Deploy: Render.com`);
+initDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`📍 URL: https://bolao-backend-txc1.onrender.com`);
+    console.log(`💾 Banco: SQLite (arquivo local)`);
+    console.log(`☁️  Deploy: Render.com`);
+    console.log(`✅ Sistema pronto para uso!`);
+  });
+}).catch((error) => {
+  console.error('❌ Erro fatal ao inicializar banco:', error);
+  process.exit(1);
 });
 
 process.on('SIGTERM', () => {
-  db.close();
-  process.exit(0);
+  if (db) {
+    db.close(() => {
+      console.log('Database closed.');
+      process.exit(0);
+    });
+  }
 });
