@@ -1,259 +1,597 @@
+// server.js - VERSÃO COMPLETA COM ADMIN
 const express = require('express');
 const cors = require('cors');
-const bodyParser = require('body-parser');
+const sqlite3 = require('sqlite3').verbose();
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const axios = require('axios');
-const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configurações
-const API_KEY = 'a1f6d24cd4b844e082f1d4b4507ccb62'; // Sua API Key
-const API_URL = 'https://api.football-data.org/v4';
-const COMPETITION_CODE = 'CL'; // Champions League
+// Variáveis de ambiente
+const JWT_SECRET = process.env.JWT_SECRET || 'seu-secret-super-secreto-aqui-12345';
+const FOOTBALL_API_KEY = process.env.FOOTBALL_API_KEY || 'sua-chave-aqui';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'ADMIN_MASTER_2025'; // 🔑 TOKEN ADMIN PADRÃO
 
-// Middleware
+// Middlewares
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-// ==========================================
-// BANCO DE DADOS EM MEMÓRIA (Simulação)
-// Em produção real, substitua por MongoDB/Postgres
-// ==========================================
-const db = {
-  users: [],       // { id, username, password, token, points, isAdmin }
-  bets: [],        // { id, userId, matchId, teamAScore, teamBScore, createdAt }
-  tokens: ['CHAMPIONS2024', 'BOLAOVIP'], // Tokens de acesso válidos para cadastro
-  matchesCache: null,
-  lastCacheTime: 0
+// ==================== BANCO DE DADOS ====================
+
+const db = new sqlite3.Database('./bolao.db', (err) => {
+  if (err) {
+    console.error('❌ Erro ao conectar no banco:', err);
+  } else {
+    console.log('✅ Conectado ao SQLite');
+  }
+});
+
+// Criar tabelas
+db.serialize(() => {
+  // Tabela de usuários COM ROLE
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT DEFAULT 'user',
+      points INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Tabela de partidas
+  db.run(`
+    CREATE TABLE IF NOT EXISTS matches (
+      id TEXT PRIMARY KEY,
+      teamA TEXT NOT NULL,
+      teamB TEXT NOT NULL,
+      date TEXT NOT NULL,
+      status TEXT DEFAULT 'upcoming',
+      teamAScore INTEGER,
+      teamBScore INTEGER,
+      competition TEXT DEFAULT 'Champions League',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Tabela de palpites
+  db.run(`
+    CREATE TABLE IF NOT EXISTS bets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      match_id TEXT NOT NULL,
+      teamAScore INTEGER NOT NULL,
+      teamBScore INTEGER NOT NULL,
+      points INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (match_id) REFERENCES matches(id),
+      UNIQUE(user_id, match_id)
+    )
+  `);
+
+  // Tabela de tokens de acesso
+  db.run(`
+    CREATE TABLE IF NOT EXISTS access_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token TEXT UNIQUE NOT NULL,
+      is_admin BOOLEAN DEFAULT 0,
+      used BOOLEAN DEFAULT 0,
+      used_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (used_by) REFERENCES users(id)
+    )
+  `);
+
+  console.log('✅ Tabelas criadas/verificadas');
+
+  // Inserir token admin padrão se não existir
+  db.get('SELECT * FROM access_tokens WHERE token = ?', [ADMIN_TOKEN], (err, row) => {
+    if (!row) {
+      db.run(
+        'INSERT INTO access_tokens (token, is_admin) VALUES (?, 1)',
+        [ADMIN_TOKEN],
+        () => {
+          console.log(`🔑 Token Admin criado: ${ADMIN_TOKEN}`);
+        }
+      );
+    }
+  });
+});
+
+// ==================== MIDDLEWARE DE AUTENTICAÇÃO ====================
+
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Token não fornecido' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ success: false, message: 'Token inválido' });
+    }
+    req.user = user;
+    next();
+  });
 };
 
-// ==========================================
-// FUNÇÕES AUXILIARES
-// ==========================================
-
-// Buscar partidas da API Externa (com Cache de 5 minutos)
-async function fetchMatches() {
-  const now = Date.now();
-  // Se o cache tem menos de 5 minutos (300000ms), retorna cache
-  if (db.matchesCache && (now - db.lastCacheTime < 300000)) {
-    console.log('Retornando partidas do cache...');
-    return db.matchesCache;
-  }
-
-  console.log('Buscando partidas da API externa...');
-  try {
-    const response = await axios.get(`${API_URL}/competitions/${COMPETITION_CODE}/matches`, {
-      headers: { 'X-Auth-Token': API_KEY }
+// Middleware para verificar se é admin
+const requireAdmin = (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ 
+      success: false, 
+      message: 'Acesso negado. Apenas administradores.' 
     });
-
-    const matches = response.data.matches.map(m => ({
-      id: m.id.toString(),
-      teamA: m.homeTeam.shortName || m.homeTeam.name,
-      teamB: m.awayTeam.shortName || m.awayTeam.name,
-      date: m.utcDate,
-      status: m.status === 'FINISHED' ? 'played' : 'upcoming',
-      teamAScore: m.score.fullTime.home,
-      teamBScore: m.score.fullTime.away,
-      stage: m.stage
-    }));
-
-    db.matchesCache = matches;
-    db.lastCacheTime = now;
-    return matches;
-  } catch (error) {
-    console.error('Erro ao buscar na API:', error.message);
-    return db.matchesCache || []; // Retorna cache antigo se falhar
   }
+  next();
+};
+
+// ==================== ROTAS DE AUTENTICAÇÃO ====================
+
+// Registro
+app.post('/api/auth/register', async (req, res) => {
+  const { username, password, access_token } = req.body;
+
+  if (!username || !password || !access_token) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Username, senha e token são obrigatórios' 
+    });
+  }
+
+  try {
+    // Verificar se o token de acesso é válido
+    db.get(
+      'SELECT * FROM access_tokens WHERE token = ? AND used = 0',
+      [access_token],
+      async (err, tokenRow) => {
+        if (err || !tokenRow) {
+          return res.status(400).json({ 
+            success: false, 
+            message: 'Token de acesso inválido ou já utilizado' 
+          });
+        }
+
+        // Hash da senha
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // Determinar role baseado no token
+        const userRole = tokenRow.is_admin ? 'admin' : 'user';
+
+        // Criar usuário
+        db.run(
+          'INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
+          [username, hashedPassword, userRole],
+          function(err) {
+            if (err) {
+              if (err.message.includes('UNIQUE')) {
+                return res.status(400).json({ 
+                  success: false, 
+                  message: 'Username já existe' 
+                });
+              }
+              return res.status(500).json({ 
+                success: false, 
+                message: 'Erro ao criar usuário' 
+              });
+            }
+
+            const userId = this.lastID;
+
+            // Marcar token como usado
+            db.run(
+              'UPDATE access_tokens SET used = 1, used_by = ? WHERE token = ?',
+              [userId, access_token]
+            );
+
+            // Gerar JWT
+            const jwtToken = jwt.sign(
+              { id: userId, username, role: userRole },
+              JWT_SECRET,
+              { expiresIn: '30d' }
+            );
+
+            res.json({
+              success: true,
+              message: `Usuário ${userRole === 'admin' ? 'ADMIN' : ''} criado com sucesso`,
+              data: {
+                token: jwtToken,
+                user: {
+                  id: userId,
+                  username,
+                  role: userRole,
+                  points: 0
+                }
+              }
+            });
+          }
+        );
+      }
+    );
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Erro no servidor' });
+  }
+});
+
+// Login
+app.post('/api/auth/login', (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Username e senha são obrigatórios' 
+    });
+  }
+
+  db.get('SELECT * FROM users WHERE username = ?', [username], async (err, user) => {
+    if (err || !user) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Credenciais inválidas' 
+      });
+    }
+
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Credenciais inválidas' 
+      });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login realizado com sucesso',
+      data: {
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          role: user.role,
+          points: user.points
+        }
+      }
+    });
+  });
+});
+
+// ==================== ROTAS DE PARTIDAS ====================
+
+// Buscar todas as partidas
+app.get('/api/matches', authenticateToken, (req, res) => {
+  db.all('SELECT * FROM matches ORDER BY date ASC', (err, matches) => {
+    if (err) {
+      return res.status(500).json({ success: false, message: 'Erro ao buscar partidas' });
+    }
+    res.json({ success: true, data: matches });
+  });
+});
+
+// Buscar partida específica
+app.get('/api/matches/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  
+  db.get('SELECT * FROM matches WHERE id = ?', [id], (err, match) => {
+    if (err || !match) {
+      return res.status(404).json({ success: false, message: 'Partida não encontrada' });
+    }
+    res.json({ success: true, data: match });
+  });
+});
+
+// ==================== ROTAS ADMIN - GERENCIAR PARTIDAS ====================
+
+// Atualizar resultado de uma partida (ADMIN ONLY)
+app.put('/api/admin/matches/:id/result', authenticateToken, requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const { teamAScore, teamBScore } = req.body;
+
+  if (teamAScore === undefined || teamBScore === undefined) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Scores são obrigatórios' 
+    });
+  }
+
+  db.run(
+    `UPDATE matches 
+     SET teamAScore = ?, teamBScore = ?, status = 'played', updated_at = CURRENT_TIMESTAMP 
+     WHERE id = ?`,
+    [teamAScore, teamBScore, id],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ success: false, message: 'Erro ao atualizar partida' });
+      }
+
+      if (this.changes === 0) {
+        return res.status(404).json({ success: false, message: 'Partida não encontrada' });
+      }
+
+      // Calcular pontos dos palpites
+      calculateBetPoints(id);
+
+      // Buscar partida atualizada
+      db.get('SELECT * FROM matches WHERE id = ?', [id], (err, match) => {
+        res.json({
+          success: true,
+          message: 'Resultado atualizado com sucesso',
+          data: match
+        });
+      });
+    }
+  );
+});
+
+// Criar nova partida (ADMIN ONLY)
+app.post('/api/admin/matches', authenticateToken, requireAdmin, (req, res) => {
+  const { id, teamA, teamB, date } = req.body;
+
+  if (!id || !teamA || !teamB || !date) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Todos os campos são obrigatórios' 
+    });
+  }
+
+  db.run(
+    'INSERT INTO matches (id, teamA, teamB, date) VALUES (?, ?, ?, ?)',
+    [id, teamA, teamB, date],
+    function(err) {
+      if (err) {
+        if (err.message.includes('UNIQUE')) {
+          return res.status(400).json({ success: false, message: 'Partida já existe' });
+        }
+        return res.status(500).json({ success: false, message: 'Erro ao criar partida' });
+      }
+
+      db.get('SELECT * FROM matches WHERE id = ?', [id], (err, match) => {
+        res.json({
+          success: true,
+          message: 'Partida criada com sucesso',
+          data: match
+        });
+      });
+    }
+  );
+});
+
+// Gerar token de acesso (ADMIN ONLY)
+app.post('/api/admin/tokens', authenticateToken, requireAdmin, (req, res) => {
+  const { is_admin } = req.body;
+  const token = `TOKEN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+  db.run(
+    'INSERT INTO access_tokens (token, is_admin) VALUES (?, ?)',
+    [token, is_admin ? 1 : 0],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ success: false, message: 'Erro ao gerar token' });
+      }
+
+      res.json({
+        success: true,
+        message: 'Token gerado com sucesso',
+        data: {
+          token,
+          is_admin: !!is_admin,
+          type: is_admin ? 'ADMIN' : 'USER'
+        }
+      });
+    }
+  );
+});
+
+// Listar todos os tokens (ADMIN ONLY)
+app.get('/api/admin/tokens', authenticateToken, requireAdmin, (req, res) => {
+  db.all(
+    `SELECT t.*, u.username as used_by_username 
+     FROM access_tokens t 
+     LEFT JOIN users u ON t.used_by = u.id 
+     ORDER BY t.created_at DESC`,
+    (err, tokens) => {
+      if (err) {
+        return res.status(500).json({ success: false, message: 'Erro ao buscar tokens' });
+      }
+      res.json({ success: true, data: tokens });
+    }
+  );
+});
+
+// ==================== ROTAS DE PALPITES ====================
+
+// Buscar palpites do usuário
+app.get('/api/bets/user', authenticateToken, (req, res) => {
+  const userId = req.user.id;
+
+  db.all(
+    'SELECT * FROM bets WHERE user_id = ?',
+    [userId],
+    (err, bets) => {
+      if (err) {
+        return res.status(500).json({ success: false, message: 'Erro ao buscar palpites' });
+      }
+
+      // Transformar array em objeto {matchId: bet}
+      const betsObj = {};
+      bets.forEach(bet => {
+        betsObj[bet.match_id] = {
+          matchId: bet.match_id,
+          teamAScore: bet.teamAScore,
+          teamBScore: bet.teamBScore,
+          points: bet.points,
+          createdAt: bet.created_at
+        };
+      });
+
+      res.json({ success: true, data: betsObj });
+    }
+  );
+});
+
+// Criar ou atualizar palpite
+app.post('/api/bets', authenticateToken, (req, res) => {
+  const { matchId, teamAScore, teamBScore } = req.body;
+  const userId = req.user.id;
+
+  if (!matchId || teamAScore === undefined || teamBScore === undefined) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Todos os campos são obrigatórios' 
+    });
+  }
+
+  // Verificar se a partida existe e ainda não foi jogada
+  db.get('SELECT * FROM matches WHERE id = ? AND status = "upcoming"', [matchId], (err, match) => {
+    if (err || !match) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Partida não disponível para palpites' 
+      });
+    }
+
+    // Insert or update
+    db.run(
+      `INSERT INTO bets (user_id, match_id, teamAScore, teamBScore) 
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, match_id) 
+       DO UPDATE SET teamAScore = ?, teamBScore = ?, updated_at = CURRENT_TIMESTAMP`,
+      [userId, matchId, teamAScore, teamBScore, teamAScore, teamBScore],
+      function(err) {
+        if (err) {
+          return res.status(500).json({ success: false, message: 'Erro ao salvar palpite' });
+        }
+
+        res.json({
+          success: true,
+          message: 'Palpite salvo com sucesso',
+          data: {
+            matchId,
+            teamAScore,
+            teamBScore,
+            createdAt: new Date().toISOString()
+          }
+        });
+      }
+    );
+  });
+});
+
+// ==================== RANKING ====================
+
+app.get('/api/ranking', authenticateToken, (req, res) => {
+  db.all(
+    `SELECT id, username, points, role
+     FROM users 
+     ORDER BY points DESC, username ASC`,
+    (err, users) => {
+      if (err) {
+        return res.status(500).json({ success: false, message: 'Erro ao buscar ranking' });
+      }
+
+      const ranking = users.map((user, index) => ({
+        position: index + 1,
+        username: user.username,
+        points: user.points,
+        isAdmin: user.role === 'admin'
+      }));
+
+      res.json({ success: true, data: ranking });
+    }
+  );
+});
+
+// ==================== USUÁRIO ====================
+
+app.get('/api/user/me', authenticateToken, (req, res) => {
+  db.get(
+    'SELECT id, username, points, role FROM users WHERE id = ?',
+    [req.user.id],
+    (err, user) => {
+      if (err || !user) {
+        return res.status(404).json({ success: false, message: 'Usuário não encontrado' });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          username: user.username,
+          points: user.points,
+          role: user.role
+        }
+      });
+    }
+  );
+});
+
+// ==================== FUNÇÕES AUXILIARES ====================
+
+// Calcular pontos dos palpites após resultado
+function calculateBetPoints(matchId) {
+  db.get('SELECT * FROM matches WHERE id = ?', [matchId], (err, match) => {
+    if (err || !match || match.teamAScore === null) return;
+
+    db.all('SELECT * FROM bets WHERE match_id = ?', [matchId], (err, bets) => {
+      if (err) return;
+
+      bets.forEach(bet => {
+        const points = calculatePoints(
+          match.teamAScore,
+          match.teamBScore,
+          bet.teamAScore,
+          bet.teamBScore
+        );
+
+        // Atualizar pontos do palpite
+        db.run('UPDATE bets SET points = ? WHERE id = ?', [points, bet.id]);
+
+        // Atualizar pontos totais do usuário
+        db.run(
+          'UPDATE users SET points = (SELECT SUM(points) FROM bets WHERE user_id = ?) WHERE id = ?',
+          [bet.user_id, bet.user_id]
+        );
+      });
+    });
+  });
 }
 
-// Calcular Pontos
-function calculatePoints(match, bet) {
-  if (match.status !== 'played' || match.teamAScore === null) return 0;
-  
-  const realA = match.teamAScore;
-  const realB = match.teamBScore;
-  const betA = bet.teamAScore;
-  const betB = bet.teamBScore;
-
-  // Placar Exato (25 pts)
-  if (realA === betA && realB === betB) {
-    // Empate exato vale 15 pts no seu app, vitória exata vale 25
-    if (realA === realB) return 15; 
-    return 25;
+// Lógica de cálculo de pontos
+function calculatePoints(actualA, actualB, betA, betB) {
+  // Placar exato
+  if (betA === actualA && betB === actualB) {
+    return actualA === actualB ? 15 : 25;
   }
 
-  // Acertou Vencedor ou Empate (sem placar exato)
-  const realWinner = realA > realB ? 'A' : (realB > realA ? 'B' : 'DRAW');
-  const betWinner = betA > betB ? 'A' : (betB > betA ? 'B' : 'DRAW');
+  // Acertou vencedor
+  if ((betA > betB && actualA > actualB) || (betA < betB && actualA < actualB)) {
+    return 10;
+  }
 
-  if (realWinner === betWinner) {
+  // Acertou empate
+  if (betA === betB && actualA === actualB) {
     return 10;
   }
 
   return 0;
 }
 
-// Atualizar Ranking
-async function updateRanking() {
-  const matches = await fetchMatches();
-  
-  db.users.forEach(user => {
-    let totalPoints = 0;
-    const userBets = db.bets.filter(b => b.userId === user.id);
-    
-    userBets.forEach(bet => {
-      const match = matches.find(m => m.id === bet.matchId);
-      if (match) {
-        totalPoints += calculatePoints(match, bet);
-      }
-    });
-    
-    user.points = totalPoints;
-  });
-}
+// ==================== SERVIDOR ====================
 
-// ==========================================
-// ROTAS - AUTH
-// ==========================================
-
-app.post('/api/auth/register', (req, res) => {
-  const { username, password, access_token } = req.body;
-
-  if (!db.tokens.includes(access_token)) {
-    return res.status(400).json({ success: false, message: 'Token de acesso inválido.' });
-  }
-
-  if (db.users.find(u => u.username === username)) {
-    return res.status(400).json({ success: false, message: 'Usuário já existe.' });
-  }
-
-  const newUser = {
-    id: uuidv4(),
-    username,
-    password, // Em produção, use hash (bcrypt)
-    token: uuidv4(), // Token de sessão simples
-    points: 0,
-    isAdmin: false
-  };
-
-  db.users.push(newUser);
-  res.json({ success: true, data: { token: newUser.token, user: newUser } });
-});
-
-app.post('/api/auth/login', (req, res) => {
-  const { username, password } = req.body;
-  const user = db.users.find(u => u.username === username && u.password === password);
-
-  if (!user) {
-    return res.status(401).json({ success: false, message: 'Credenciais inválidas.' });
-  }
-
-  // Atualiza pontos ao logar para garantir
-  updateRanking();
-
-  res.json({ success: true, data: { token: user.token, user } });
-});
-
-app.get('/api/user/me', (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  const user = db.users.find(u => u.token === token);
-  
-  if (user) {
-    res.json({ success: true, data: user });
-  } else {
-    res.status(401).json({ success: false, message: 'Não autorizado' });
-  }
-});
-
-// ==========================================
-// ROTAS - PARTIDAS E PALPITES
-// ==========================================
-
-app.get('/api/matches', async (req, res) => {
-  const matches = await fetchMatches();
-  res.json({ success: true, data: matches });
-});
-
-app.get('/api/bets/user', (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  const user = db.users.find(u => u.token === token);
-
-  if (!user) return res.status(401).json({ message: 'Unauthorized' });
-
-  const userBets = db.bets.filter(b => b.userId === user.id);
-  const betsMap = {};
-  
-  userBets.forEach(b => {
-    betsMap[b.matchId] = {
-      matchId: b.matchId,
-      teamAScore: b.teamAScore,
-      teamBScore: b.teamBScore,
-      createdAt: b.createdAt
-    };
-  });
-
-  res.json({ success: true, data: betsMap });
-});
-
-app.post('/api/bets', (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  const user = db.users.find(u => u.token === token);
-  const { matchId, teamAScore, teamBScore } = req.body;
-
-  if (!user) return res.status(401).json({ message: 'Unauthorized' });
-
-  // Verifica se a partida já começou (opcional, mas recomendado)
-  // ...
-
-  // Remove aposta antiga se existir
-  const existingBetIndex = db.bets.findIndex(b => b.userId === user.id && b.matchId === matchId);
-  if (existingBetIndex !== -1) {
-    db.bets.splice(existingBetIndex, 1);
-  }
-
-  const newBet = {
-    id: uuidv4(),
-    userId: user.id,
-    matchId,
-    teamAScore,
-    teamBScore,
-    createdAt: new Date().toISOString()
-  };
-
-  db.bets.push(newBet);
-  res.json({ success: true, message: 'Palpite salvo com sucesso!' });
-});
-
-// ==========================================
-// ROTAS - RANKING
-// ==========================================
-
-app.get('/api/ranking', async (req, res) => {
-  await updateRanking(); // Recalcula antes de enviar
-
-  const sortedUsers = [...db.users].sort((a, b) => b.points - a.points);
-  
-  const ranking = sortedUsers.map((u, index) => ({
-    username: u.username,
-    points: u.points,
-    position: index + 1
-  }));
-
-  res.json({ success: true, data: ranking });
-});
-
-// ==========================================
-// ROTAS - ADMIN (Opcional/Simplificado)
-// ==========================================
-
-app.post('/api/admin/tokens', (req, res) => {
-  const { token } = req.body;
-  db.tokens.push(token);
-  res.json({ success: true, data: db.tokens });
-});
-
-// Iniciar Servidor
 app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
+  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+  console.log(`🔑 Token Admin: ${ADMIN_TOKEN}`);
+  console.log(`📊 Acesse: http://localhost:${PORT}`);
 });
